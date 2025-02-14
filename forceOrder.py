@@ -2,19 +2,19 @@ import asyncio
 import websockets
 import json
 from collections import defaultdict
+from datetime import datetime
 import time
 
-# Store the quantities of each symbol's SELL and BUY orders
+from repositories import BaseRepository
+from basic_snapshot import BasicSnapshot
+
 order_data = defaultdict(lambda: {"SELL": 0.0, "BUY": 0.0})
 
-# WebSocket stream URL
 BASE_URL = "wss://fstream.binance.com/ws/!forceOrder@arr"
 
-# Function to process incoming WebSocket messages
 async def process_message(message):
     global order_data
 
-    # Parse the message
     data = json.loads(message)
     if "o" in data:
         event_data = data["o"]
@@ -22,48 +22,46 @@ async def process_message(message):
         side = event_data['S']
         quantity = float(event_data['q'])
 
-        # Print the event in the required JSON format
-        print(json.dumps({
-            "e": "forceOrder",  # Event Type
-            "E": int(time.time() * 1000),  # Event Time (current time in ms)
-            "o": {
-                "s": symbol,  # Symbol
-                "S": side,  # Side (SELL/BUY)
-                "q": f"{quantity:.3f}"  # Quantity (formatted to 3 decimal places)
-            }
-        }, indent=4))
-
-        # Update the SELL or BUY total for the symbol
         if side == "SELL":
             order_data[symbol]["SELL"] += quantity
         elif side == "BUY":
             order_data[symbol]["BUY"] += quantity
 
-# Function to print the cumulative results every 5 minutes
 async def print_results():
-    start_time = time.time()
+    global order_data
+    repository = BaseRepository("liquidation")
+
+    interval_time = 300
 
     while True:
-        # Print the cumulative results every 5 minutes
-        if time.time() - start_time >= 300:  # 5 minutes (300 seconds)
-            for symbol, data in order_data.items():
-                sell_quantity = data['SELL']
-                buy_quantity = data['BUY']
+        # Get current time and calculate seconds until next 5-minute mark
+        now = datetime.now()
+        # print(now)
+        seconds_until_next_5_min = (interval_time - (now.minute * 60 + now.second) % interval_time)
+        # print(seconds_until_next_5_min)
 
-                # Print the cumulative SELL and BUY in the required format
-                print(f"{symbol.upper()} SELL {sell_quantity:.3f}")
-                print(f"{symbol.upper()} BUY {buy_quantity:.3f}")
+        # Wait until the next 5-minute mark
+        await asyncio.sleep(seconds_until_next_5_min)
 
-            # Reset the start time for the next 5-minute interval
-            start_time = time.time()
+        # Save the data
+        for symbol, data in order_data.items():
+            sell_quantity = data['SELL']
+            buy_quantity = data['BUY']
 
-        await asyncio.sleep(1)  # Check every second for the 5-minute interval
+            repository.add({
+                "exchange_id": 1,
+                "symbol": symbol,
+                "BuyLiq": buy_quantity,
+                "SellLiq": sell_quantity,
+                "timestamp": datetime.utcnow()
+            })
 
-# Function to connect to the WebSocket with automatic reconnection
+        # Reset the order data after saving
+        order_data = defaultdict(lambda: {"SELL": 0.0, "BUY": 0.0})
+
 async def connect_websocket():
     while True:
         try:
-            # Try to establish the WebSocket connection
             async with websockets.connect(BASE_URL) as websocket:
                 print("Connected to WebSocket.")
                 while True:
@@ -74,14 +72,10 @@ async def connect_websocket():
         except Exception as e:
             print(f"Error receiving data: {e}. Reconnecting...")
 
-        # Wait before trying to reconnect
         await asyncio.sleep(5)
 
-# Main function to run everything
 async def main():
-    # Start the WebSocket connection and print results
     await asyncio.gather(connect_websocket(), print_results())
 
-# Run the main function
 if __name__ == "__main__":
     asyncio.run(main())
